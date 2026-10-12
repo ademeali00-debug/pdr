@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="fr"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Scanner QR</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,sans-serif}
+  #wrap{position:fixed;inset:0;display:flex;flex-direction:column}
+  #vbox{position:relative;flex:1;min-height:0}
+  video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+  #frame{position:absolute;left:50%;top:50%;width:70%;max-width:420px;aspect-ratio:1;transform:translate(-50%,-50%);
+         border:3px solid #4ade80;border-radius:18px;box-shadow:0 0 0 100vmax rgba(0,0,0,.35);pointer-events:none}
+  #top{position:absolute;left:0;right:0;top:0;padding:8px 12px;background:rgba(0,0,0,.65);font-size:13px;text-align:center;z-index:2}
+  #msg{padding:10px 14px;text-align:center;font-size:15px;background:#111}
+  button,label.btn{display:inline-block;margin:6px 4px;padding:10px 16px;font-size:15px;border:0;border-radius:10px;background:#2ea6ff;color:#fff;cursor:pointer}
+  #retry{display:none}
+</style></head>
+<body><div id="wrap">
+  <div id="vbox"><video id="v" playsinline muted autoplay></video><div id="frame"></div><div id="top">Ouverture de la caméra…</div></div>
+  <div id="msg"><span id="txt">Placez le QR code dans le cadre, bien net et assez grand.</span><br>
+    <button id="native" style="display:none">📷 Scanner avec la caméra de Telegram</button>
+    <button id="retry">Réessayer</button>
+    <label class="btn" style="background:#374151">🖼️ Depuis la galerie (photo du QR)<input id="file" type="file" accept="image/*" style="display:none"></label></div>
+</div>
+<canvas id="c" style="display:none"></canvas>
+<script>
+const tg = window.Telegram && Telegram.WebApp;
+if (tg) { try { tg.ready(); tg.expand(); } catch(e){} }
+const $ = id => document.getElementById(id);
+const txt = $('txt'), top_ = $('top'), retry = $('retry');
+let done = false, stream = null, frames = 0, engine = '', jsState = 'loading';
+const status = t => { top_.textContent = t; };
+
+function finish(text) {
+  if (done) return; done = true;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  txt.textContent = '✅ ' + text.slice(0, 80); status('Code lu : envoi au bot…');
+  if (navigator.vibrate) navigator.vibrate(60);
+  if (tg) { try { tg.sendData(text); } catch(e) { status('Erreur envoi : ' + e); done = false; } }
+}
+
+// jsQR : 3 sources, 6 s maximum chacune (ne bloque jamais la caméra)
+function loadJsQR() {
+  const urls = ['https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js',
+                'https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js',
+                'https://unpkg.com/jsqr@1.4.0/dist/jsQR.js'];
+  return new Promise(res => {
+    let i = 0;
+    const next = () => {
+      if (window.jsQR) { jsState = 'ok'; return res(true); }
+      if (i >= urls.length) { jsState = 'fail'; return res(false); }
+      const s = document.createElement('script'); s.src = urls[i++]; let fin = false;
+      const go = ok => { if (fin) return; fin = true; clearTimeout(t); ok ? (jsState = 'ok', res(true)) : next(); };
+      const t = setTimeout(() => go(false), 6000);
+      s.onload = () => go(!!window.jsQR); s.onerror = () => go(false);
+      document.head.appendChild(s);
+    };
+    next();
+  });
+}
+
+function decodeCanvas(ctx, w, h) {
+  const img = ctx.getImageData(0, 0, w, h);
+  const q = window.jsQR(img.data, w, h, {inversionAttempts: 'attemptBoth'});
+  return q && q.data ? q.data : '';
+}
+
+async function openCamera() {
+  const tries = [{video: {facingMode: {ideal: 'environment'}, width: {ideal: 1920}, height: {ideal: 1080}}, audio: false},
+                 {video: true, audio: false}];
+  let err;
+  for (const c of tries) { try { return await navigator.mediaDevices.getUserMedia(c); } catch (e) { err = e; if (e && e.name === 'NotAllowedError') break; } }
+  throw err;
+}
+
+async function webScan() {
+  const v = $('v'), c = $('c'), ctx = c.getContext('2d', {willReadFrequently: true});
+  loadJsQR();                                   // en parallèle, sans attendre
+  try { stream = await openCamera(); }
+  catch (e) {
+    txt.textContent = '❌ Caméra indisponible : ' + (e && e.name ? e.name : e) + '. Fermez les autres applications qui utilisent la caméra, autorisez-la, puis réessayez.';
+    status('Caméra non ouverte'); retry.style.display = 'inline-block'; return;
+  }
+  v.srcObject = stream; try { await v.play(); } catch(e) {}
+  let det = null;
+  if ('BarcodeDetector' in window) { try { det = new BarcodeDetector({formats: ['qr_code']}); } catch(e) { det = null; } }
+  engine = det ? 'natif' : 'jsQR';
+  const loop = async () => {
+    if (done) return;
+    if (v.videoWidth) {
+      frames++;
+      if (det) {
+        try { const r = await det.detect(v); if (r.length && r[0].rawValue) return finish(r[0].rawValue); }
+        catch (e) { det = null; engine = 'jsQR'; }
+      }
+      if ((!det || frames % 3 === 0) && window.jsQR) {
+        try {
+          const sc = Math.min(1, 1280 / v.videoWidth);
+          c.width = Math.round(v.videoWidth * sc); c.height = Math.round(v.videoHeight * sc);
+          ctx.drawImage(v, 0, 0, c.width, c.height);
+          const t = decodeCanvas(ctx, c.width, c.height); if (t) return finish(t);
+        } catch (e) { status('Erreur lecture : ' + e); }
+      }
+      if (frames % 5 === 0) {
+        const lib = window.jsQR ? 'jsQR prêt' : (jsState === 'fail' ? 'jsQR NON chargé' : 'jsQR en chargement…');
+        status('Caméra OK ' + v.videoWidth + '×' + v.videoHeight + ' · moteur : ' + engine + ' · ' + lib + ' · images : ' + frames);
+      }
+    } else if (frames === 0) { status('Caméra ouverte, en attente de l’image…'); }
+    setTimeout(loop, 100);
+  };
+  loop();
+}
+
+$('file').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  status('Analyse de la photo…');
+  if (!window.jsQR) await loadJsQR();
+  if (!window.jsQR) { status('Lecteur indisponible (internet).'); return; }
+  const bmp = await createImageBitmap(f), c = $('c'), ctx = c.getContext('2d', {willReadFrequently: true});
+  for (const m of [1600, 1000, 2400, 700]) {
+    const sc = Math.min(1, m / Math.max(bmp.width, bmp.height)) || 1;
+    c.width = Math.round(bmp.width * sc); c.height = Math.round(bmp.height * sc);
+    ctx.drawImage(bmp, 0, 0, c.width, c.height);
+    const t = decodeCanvas(ctx, c.width, c.height); if (t) return finish(t);
+  }
+  txt.textContent = '❌ QR non lu sur cette photo.'; status('');
+};
+
+const DESKTOP = ['tdesktop', 'macos', 'weba', 'webk', 'webz', 'unigram', 'unknown', ''];
+function canNative() {
+  return !!(tg && tg.showScanQrPopup && tg.isVersionAtLeast && tg.isVersionAtLeast('6.4') && !DESKTOP.includes(String(tg.platform || '').toLowerCase()));
+}
+function nativeScan() {   // scanner natif de Telegram (téléphone)
+  try {
+    tg.offEvent && tg.offEvent('qrTextReceived'); tg.offEvent && tg.offEvent('scanQrPopupClosed');
+    tg.onEvent('qrTextReceived', e => { try { tg.closeScanQrPopup(); } catch(x) {} finish(e.data); });
+    tg.onEvent('scanQrPopupClosed', () => { if (!done) { txt.textContent = 'Scan fermé. Touchez « Scanner avec la caméra de Telegram ».'; $('native').style.display = 'inline-block'; } });
+    tg.showScanQrPopup({text: 'Scannez le QR code de la pièce'});
+  } catch (e) {
+    status('Scanner Telegram indisponible (' + (e && e.message ? e.message : e) + ') → caméra de la page');
+    webScan();
+  }
+}
+
+$('native').onclick = () => nativeScan();
+retry.onclick = () => { retry.style.display = 'none'; txt.textContent = 'Placez le QR code dans le cadre…'; if (canNative()) nativeScan(); else webScan(); };
+function start() {
+  const info = tg ? ('Telegram ' + (tg.version || '?') + ' · ' + (tg.platform || '?')) : 'hors Telegram';
+  if (tg && tg.showScanQrPopup) $('native').style.display = 'inline-block';
+  if (canNative()) { status(info + ' → scanner Telegram'); nativeScan(); }
+  else { status(info + ' → caméra de la page'); webScan(); }
+}
+start();
+</script></body></html>
