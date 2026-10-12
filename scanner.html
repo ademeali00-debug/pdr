@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="fr"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Scanner QR</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,sans-serif}
+  #wrap{position:fixed;inset:0;display:flex;flex-direction:column}
+  video{flex:1;width:100%;object-fit:cover;background:#000}
+  #frame{position:absolute;left:50%;top:42%;width:62vmin;height:62vmin;transform:translate(-50%,-50%);
+         border:3px solid #4ade80;border-radius:18px;box-shadow:0 0 0 100vmax rgba(0,0,0,.45);pointer-events:none}
+  #msg{padding:14px 16px;text-align:center;font-size:16px;background:#111}
+  button{margin:6px;padding:12px 18px;font-size:16px;border:0;border-radius:10px;background:#2ea6ff;color:#fff}
+  #retry{display:none}
+</style></head>
+<body><div id="wrap">
+  <video id="v" playsinline muted></video><div id="frame"></div>
+  <div id="msg">Placez le QR code dans le cadre…<br><button id="retry">Réessayer</button></div>
+</div>
+<canvas id="c" style="display:none"></canvas>
+<script>
+const tg = window.Telegram && Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const msg = document.getElementById('msg'), retry = document.getElementById('retry');
+let done = false, stream = null;
+
+function finish(text) {
+  if (done) return; done = true;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  msg.textContent = '✅ ' + text.slice(0, 80);
+  if (navigator.vibrate) navigator.vibrate(60);
+  if (tg) tg.sendData(text);          // envoie le texte au bot et ferme la Mini App
+}
+
+async function webScan() {
+  const v = document.getElementById('v'), c = document.getElementById('c'), ctx = c.getContext('2d', {willReadFrequently:true});
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}, width:{ideal:1280}}, audio:false});
+  } catch (e) { msg.innerHTML = '❌ Caméra refusée ou indisponible.<br>Autorisez la caméra puis réessayez.<br>'; msg.appendChild(retry); retry.style.display='inline-block'; return; }
+  v.srcObject = stream; await v.play();
+  const det = ('BarcodeDetector' in window) ? new BarcodeDetector({formats:['qr_code']}) : null;
+  const loop = async () => {
+    if (done) return;
+    if (v.videoWidth) {
+      try {
+        if (det) { const r = await det.detect(v); if (r.length && r[0].rawValue) return finish(r[0].rawValue); }
+        else {
+          c.width = v.videoWidth; c.height = v.videoHeight; ctx.drawImage(v, 0, 0);
+          const img = ctx.getImageData(0, 0, c.width, c.height);
+          const q = jsQR(img.data, c.width, c.height, {inversionAttempts:'attemptBoth'});
+          if (q && q.data) return finish(q.data);
+        }
+      } catch (e) {}
+    }
+    setTimeout(loop, 120);
+  };
+  loop();
+}
+
+function nativeScan() {   // scanner natif de Telegram (mobile)
+  tg.onEvent('qrTextReceived', e => { tg.closeScanQrPopup(); finish(e.data); });
+  tg.onEvent('scanQrPopupClosed', () => { if (!done) { msg.innerHTML = 'Scan fermé.<br>'; msg.appendChild(retry); retry.style.display='inline-block'; } });
+  tg.showScanQrPopup({text: 'Scannez le QR code de la pièce'});
+}
+
+retry.onclick = () => { retry.style.display = 'none'; start(true); };
+function start(forceWeb) {
+  const mobile = tg && tg.isVersionAtLeast && tg.isVersionAtLeast('6.4') && ['android','ios'].includes(tg.platform);
+  if (mobile && !forceWeb) nativeScan(); else webScan();
+}
+start(false);
+</script></body></html>
